@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+import csv
+import json
 import sqlite3
+from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -13,6 +16,15 @@ from rich.table import Table
 
 from abs_cli.client import ABSClient
 from abs_cli.models import LibationBook, ProgressItem
+
+
+@dataclass
+class FinishedBook:
+    """Ein als gehoert markiertes Buch aus einer externen Quelle."""
+
+    asin: str
+    title: str
+    source: str
 
 
 def _format_time(seconds: float) -> str:
@@ -147,15 +159,8 @@ def progress_list(ctx: click.Context, finished: bool, in_progress: bool) -> None
     console.print(table)
 
 
-def _read_libation_finished(db_path: Path) -> list[LibationBook]:
-    """Liest abgeschlossene Buecher aus der Libation-Datenbank.
-
-    Args:
-        db_path: Pfad zur Libation SQLite-Datenbank
-
-    Returns:
-        Liste der abgeschlossenen Buecher
-    """
+def _read_libation_finished(db_path: Path) -> list[FinishedBook]:
+    """Liest abgeschlossene Buecher aus der Libation-Datenbank."""
     conn = sqlite3.connect(str(db_path))
     try:
         cursor = conn.execute(
@@ -164,9 +169,37 @@ def _read_libation_finished(db_path: Path) -> list[LibationBook]:
             "JOIN UserDefinedItem udi ON b.AudibleProductId = udi.BookId "
             "WHERE udi.IsFinished = 1"
         )
-        return [LibationBook(asin=row[0], title=row[1]) for row in cursor.fetchall()]
+        return [FinishedBook(asin=row[0], title=row[1], source="Libation") for row in cursor.fetchall()]
     finally:
         conn.close()
+
+
+def _read_audible_export_finished(export_path: Path) -> list[FinishedBook]:
+    """Liest abgeschlossene Buecher aus einem audible-cli Export (JSON/TSV/CSV)."""
+    suffix = export_path.suffix.lower()
+
+    if suffix == ".json":
+        data = json.loads(export_path.read_text())
+        return [
+            FinishedBook(asin=item["asin"], title=item.get("title", ""), source="Audible")
+            for item in data
+            if item.get("is_finished") is True
+        ]
+
+    # TSV oder CSV
+    delimiter = "\t" if suffix == ".tsv" else ","
+    books: list[FinishedBook] = []
+    with export_path.open(newline="") as f:
+        reader = csv.DictReader(f, delimiter=delimiter)
+        for row in reader:
+            is_finished = row.get("is_finished", "").strip().lower()
+            if is_finished in ("true", "1", "yes"):
+                books.append(FinishedBook(
+                    asin=row.get("asin", ""),
+                    title=row.get("title", ""),
+                    source="Audible",
+                ))
+    return books
 
 
 def _build_asin_index(client: ABSClient) -> dict[str, dict[str, Any]]:
@@ -178,6 +211,13 @@ def _build_asin_index(client: ABSClient) -> dict[str, dict[str, Any]]:
     Returns:
         Dict mit ASIN als Key und Item-Info als Value
     """
+    # Fetch user progress from /me (library items don't include mediaProgress)
+    me_resp = client.get("/me")
+    me_resp.raise_for_status()
+    progress_by_item: dict[str, dict] = {}
+    for p in me_resp.json().get("mediaProgress", []):
+        progress_by_item[p.get("libraryItemId", "")] = p
+
     index: dict[str, dict[str, Any]] = {}
 
     libs_resp = client.get("/libraries")
@@ -200,7 +240,7 @@ def _build_asin_index(client: ABSClient) -> dict[str, dict[str, Any]]:
                 metadata = media.get("metadata", {})
                 asin = metadata.get("asin")
                 if asin:
-                    progress_data = item.get("mediaProgress") or {}
+                    progress_data = progress_by_item.get(item["id"], {})
                     index[asin] = {
                         "item_id": item["id"],
                         "title": metadata.get("title", ""),
@@ -216,30 +256,55 @@ def _build_asin_index(client: ABSClient) -> dict[str, dict[str, Any]]:
 
 
 @progress.command("sync")
-@click.option("--from-libation", "libation_db", required=True, type=click.Path(exists=True, path_type=Path), help="Pfad zur Libation SQLite-Datenbank.")
+@click.option("--from-libation", "libation_db", type=click.Path(exists=True, path_type=Path), default=None, help="Pfad zur Libation SQLite-Datenbank.")
+@click.option("--from-audible-export", "audible_export", type=click.Path(exists=True, path_type=Path), default=None, help="Pfad zum audible-cli Export (JSON/TSV/CSV).")
 @click.option("--apply", is_flag=True, default=False, help="Aenderungen tatsaechlich anwenden (Standard: Dry-Run).")
 @click.pass_context
-def progress_sync(ctx: click.Context, libation_db: Path, apply: bool) -> None:
-    """Fortschritt aus Libation synchronisieren."""
+def progress_sync(
+    ctx: click.Context, libation_db: Path | None, audible_export: Path | None, apply: bool,
+) -> None:
+    """Fortschritt aus externer Quelle synchronisieren.
+
+    Unterstuetzte Quellen:
+      --from-libation       Libation SQLite-Datenbank
+      --from-audible-export audible-cli Export (JSON/TSV/CSV)
+    """
+    if not libation_db and not audible_export:
+        raise click.UsageError("Mindestens eine Quelle angeben: --from-libation oder --from-audible-export")
+
     client: ABSClient = ctx.obj["client"]
     console = Console()
 
     if not apply:
         console.print("[yellow]DRY-RUN Modus - keine Aenderungen werden vorgenommen. Nutze --apply zum Anwenden.[/yellow]\n")
 
-    console.print("Lese Libation-Datenbank...")
-    finished_books = _read_libation_finished(libation_db)
-    console.print(f"{len(finished_books)} abgeschlossene Buecher in Libation gefunden.\n")
+    finished_books: list[FinishedBook] = []
+
+    if libation_db:
+        console.print("Lese Libation-Datenbank...")
+        libation_books = _read_libation_finished(libation_db)
+        console.print(f"{len(libation_books)} abgeschlossene Buecher in Libation gefunden.")
+        finished_books.extend(libation_books)
+
+    if audible_export:
+        console.print("Lese Audible-Export...")
+        audible_books = _read_audible_export_finished(audible_export)
+        console.print(f"{len(audible_books)} abgeschlossene Buecher im Audible-Export gefunden.")
+        finished_books.extend(audible_books)
 
     if not finished_books:
+        console.print("\nKeine abgeschlossenen Buecher gefunden.")
         return
+
+    console.print(f"\n[bold]{len(finished_books)} Buecher insgesamt aus {len({b.source for b in finished_books})} Quelle(n).[/bold]\n")
 
     console.print("Lade ABS-Bibliothek...")
     asin_index = _build_asin_index(client)
     console.print(f"{len(asin_index)} Items mit ASIN in ABS gefunden.\n")
 
-    table = Table(title="Libation-Sync")
-    table.add_column("Libation Titel", style="bold")
+    table = Table(title="Sync-Ergebnis")
+    table.add_column("Titel", style="bold")
+    table.add_column("Quelle")
     table.add_column("ASIN")
     table.add_column("ABS Match", justify="center")
     table.add_column("ABS Titel")
@@ -253,13 +318,13 @@ def progress_sync(ctx: click.Context, libation_db: Path, apply: bool) -> None:
         abs_item = asin_index.get(book.asin)
 
         if not abs_item:
-            table.add_row(book.title, book.asin, "[red]Nein[/red]", "-", "-")
+            table.add_row(book.title, book.source, book.asin, "[red]Nein[/red]", "-", "-")
             not_found += 1
             continue
 
         if abs_item["is_finished"]:
             table.add_row(
-                book.title, book.asin, "[green]Ja[/green]",
+                book.title, book.source, book.asin, "[green]Ja[/green]",
                 abs_item["title"], "[dim]Bereits abgeschlossen[/dim]",
             )
             skipped += 1
@@ -272,12 +337,12 @@ def progress_sync(ctx: click.Context, libation_db: Path, apply: bool) -> None:
             )
             resp.raise_for_status()
             table.add_row(
-                book.title, book.asin, "[green]Ja[/green]",
+                book.title, book.source, book.asin, "[green]Ja[/green]",
                 abs_item["title"], "[green]Synchronisiert[/green]",
             )
         else:
             table.add_row(
-                book.title, book.asin, "[green]Ja[/green]",
+                book.title, book.source, book.asin, "[green]Ja[/green]",
                 abs_item["title"], "[yellow]Wuerde synchronisieren[/yellow]",
             )
         synced += 1
