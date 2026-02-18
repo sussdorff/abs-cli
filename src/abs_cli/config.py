@@ -21,7 +21,7 @@ def _read_token_from_1password() -> str | None:
     """Versucht den API-Token aus 1Password zu lesen."""
     try:
         result = subprocess.run(
-            ["op", "read", "op://Private/Audiobookshelf/API Token"],
+            ["op", "read", "op://API Keys/Audiobookshelf/API Key"],
             capture_output=True,
             text=True,
             check=True,

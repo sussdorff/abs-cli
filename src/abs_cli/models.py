@@ -77,7 +77,7 @@ class LibraryItem:
             title=metadata.get("title", "Unbekannt"),
             author=metadata.get("authorName") or metadata.get("author"),
             narrator=metadata.get("narratorName") or metadata.get("narrator"),
-            duration=media.get("duration", 0.0),
+            duration=media.get("duration") or 0.0,
             asin=metadata.get("asin"),
             is_missing=data.get("isMissing", False),
         )
@@ -122,13 +122,16 @@ class ItemDetail:
 
         audio_files = media.get("audioFiles", [])
         total_size = sum(f.get("metadata", {}).get("size", 0) for f in audio_files)
+        duration = media.get("duration") or sum(
+            f.get("duration", 0) or 0 for f in audio_files
+        )
 
         return cls(
             id=data["id"],
             title=metadata.get("title", "Unbekannt"),
             author=metadata.get("authorName") or metadata.get("author"),
             narrator=metadata.get("narratorName") or metadata.get("narrator"),
-            duration=media.get("duration", 0.0),
+            duration=duration,
             asin=metadata.get("asin"),
             isbn=metadata.get("isbn"),
             description=metadata.get("description"),
@@ -175,6 +178,29 @@ class ProgressItem:
             progress=progress_data.get("progress", 0.0),
             current_time=progress_data.get("currentTime", 0.0),
             duration=duration,
+            is_finished=progress_data.get("isFinished", False),
+            last_update=progress_data.get("lastUpdate", 0),
+        )
+
+    @classmethod
+    def from_media_progress(
+        cls, progress_data: dict[str, Any], title: str = "",
+    ) -> ProgressItem:
+        """Erstellt ein ProgressItem aus /me mediaProgress-Daten.
+
+        Args:
+            progress_data: Ein Eintrag aus dem mediaProgress-Array des /me-Endpunkts
+            title: Titel des Items (separat nachgeladen)
+
+        Returns:
+            ProgressItem-Instanz
+        """
+        return cls(
+            item_id=progress_data.get("libraryItemId", ""),
+            title=title or progress_data.get("libraryItemId", ""),
+            progress=progress_data.get("progress", 0.0),
+            current_time=progress_data.get("currentTime", 0.0),
+            duration=progress_data.get("duration") or 0.0,
             is_finished=progress_data.get("isFinished", False),
             last_update=progress_data.get("lastUpdate", 0),
         )

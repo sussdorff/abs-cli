@@ -38,6 +38,48 @@ def progress() -> None:
     """Hoerfortschritt verwalten."""
 
 
+def _build_title_index(client: ABSClient) -> dict[str, str]:
+    """Baut einen Index libraryItemId -> Titel aus allen Bibliotheken.
+
+    Args:
+        client: ABSClient-Instanz
+
+    Returns:
+        Dict mit libraryItemId als Key und Titel als Value
+    """
+    index: dict[str, str] = {}
+
+    libs_resp = client.get("/libraries")
+    libs_resp.raise_for_status()
+    libraries = libs_resp.json().get("libraries", [])
+
+    for lib in libraries:
+        lib_id = lib["id"]
+        page = 0
+        while True:
+            resp = client.get(
+                f"/libraries/{lib_id}/items", params={"limit": 100, "page": page},
+            )
+            resp.raise_for_status()
+            result = resp.json()
+            lib_items = result.get("results", [])
+            if not lib_items:
+                break
+
+            for item in lib_items:
+                title = (
+                    item.get("media", {}).get("metadata", {}).get("title", "")
+                )
+                index[item["id"]] = title
+
+            total = result.get("total", 0)
+            if (page + 1) * 100 >= total:
+                break
+            page += 1
+
+    return index
+
+
 @progress.command("list")
 @click.option("--finished", is_flag=True, default=False, help="Nur abgeschlossene Items.")
 @click.option("--in-progress", "in_progress", is_flag=True, default=False, help="Nur laufende Items.")
@@ -47,22 +89,41 @@ def progress_list(ctx: click.Context, finished: bool, in_progress: bool) -> None
     client: ABSClient = ctx.obj["client"]
     console = Console()
 
-    resp = client.get("/me/items-in-progress")
-    resp.raise_for_status()
-    data = resp.json()
+    # Fetch all media progress from /me endpoint
+    me_resp = client.get("/me")
+    me_resp.raise_for_status()
+    all_progress = me_resp.json().get("mediaProgress", [])
 
-    items: list[ProgressItem] = []
-    for entry in data.get("libraryItems", []):
-        items.append(ProgressItem.from_api(entry))
-
-    if finished:
-        items = [i for i in items if i.is_finished or i.progress >= 1.0]
-    elif in_progress:
-        items = [i for i in items if not i.is_finished and i.progress < 1.0]
-
-    if not items:
+    if not all_progress:
         console.print("Keine Items gefunden.")
         return
+
+    # Filter before loading titles (saves API calls if empty after filter)
+    if finished:
+        all_progress = [
+            p for p in all_progress if p.get("isFinished") or p.get("progress", 0) >= 1.0
+        ]
+    elif in_progress:
+        all_progress = [
+            p for p in all_progress
+            if not p.get("isFinished") and p.get("progress", 0) < 1.0
+        ]
+
+    if not all_progress:
+        console.print("Keine Items gefunden.")
+        return
+
+    # Build title index to resolve libraryItemId -> title
+    title_index = _build_title_index(client)
+
+    items: list[ProgressItem] = []
+    for entry in all_progress:
+        item_id = entry.get("libraryItemId", "")
+        title = title_index.get(item_id, item_id)
+        items.append(ProgressItem.from_media_progress(entry, title=title))
+
+    # Sort: in-progress first (by progress desc), then finished (by last update desc)
+    items.sort(key=lambda i: (i.is_finished, -i.last_update))
 
     table = Table(title="Hoerfortschritt")
     table.add_column("Titel", style="bold")
