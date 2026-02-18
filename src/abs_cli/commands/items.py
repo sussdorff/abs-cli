@@ -54,8 +54,17 @@ def items() -> None:
 @click.option("--library", "library_id", required=True, help="Bibliotheks-ID.")
 @click.option("--missing", is_flag=True, default=False, help="Nur fehlende Items anzeigen.")
 @click.option("--unmatched", is_flag=True, default=False, help="Nur Items ohne ASIN anzeigen.")
+@click.option("--listened", is_flag=True, default=False, help="Nur gehoerte Items anzeigen.")
+@click.option("--not-listened", is_flag=True, default=False, help="Nur ungehoerte Items anzeigen.")
 @click.pass_context
-def list_items(ctx: click.Context, library_id: str, missing: bool, unmatched: bool) -> None:
+def list_items(
+    ctx: click.Context,
+    library_id: str,
+    missing: bool,
+    unmatched: bool,
+    listened: bool,
+    not_listened: bool,
+) -> None:
     """Items einer Bibliothek auflisten."""
     client: ABSClient = ctx.obj["client"]
 
@@ -66,10 +75,27 @@ def list_items(ctx: click.Context, library_id: str, missing: bool, unmatched: bo
     results = data.get("results", [])
     items_list = [LibraryItem.from_api(r) for r in results]
 
+    # Hoerstatus vom /me Endpunkt laden und joinen
+    me_resp = client.get("/me")
+    me_resp.raise_for_status()
+    progress_by_item: dict[str, dict] = {}
+    for p in me_resp.json().get("mediaProgress", []):
+        progress_by_item[p.get("libraryItemId", "")] = p
+
+    for item in items_list:
+        p = progress_by_item.get(item.id)
+        if p:
+            item.progress = p.get("progress", 0.0)
+            item.is_finished = p.get("isFinished", False)
+
     if missing:
         items_list = [i for i in items_list if i.is_missing]
     if unmatched:
         items_list = [i for i in items_list if not i.asin]
+    if listened:
+        items_list = [i for i in items_list if i.is_finished]
+    if not_listened:
+        items_list = [i for i in items_list if not i.is_finished]
 
     if not items_list:
         console.print("[yellow]Keine Items gefunden.[/yellow]")
@@ -80,19 +106,27 @@ def list_items(ctx: click.Context, library_id: str, missing: bool, unmatched: bo
     table.add_column("Titel", style="bold")
     table.add_column("Autor")
     table.add_column("Dauer", justify="right")
+    table.add_column("Status", justify="center")
     table.add_column("ASIN", justify="center")
     table.add_column("Fehlend", justify="center")
 
     for item in items_list:
         has_asin = "[green]Ja[/green]" if item.asin else "[red]Nein[/red]"
-        is_missing = "[red]Ja[/red]" if item.is_missing else "[green]Nein[/green]"
+        is_missing_txt = "[red]Ja[/red]" if item.is_missing else "[green]Nein[/green]"
+        if item.is_finished:
+            status = "[green]Gehoert[/green]"
+        elif item.progress > 0:
+            status = f"[yellow]{item.progress * 100:.0f}%[/yellow]"
+        else:
+            status = "[dim]—[/dim]"
         table.add_row(
             item.id,
             item.title,
             item.author or "-",
             _format_duration(item.duration),
+            status,
             has_asin,
-            is_missing,
+            is_missing_txt,
         )
 
     console.print(table)
@@ -258,25 +292,60 @@ def search(ctx: click.Context, query: str, library_id: str) -> None:
     data = resp.json()
 
     book_results = data.get("book", data.get("podcast", []))
+    author_results = data.get("authors", [])
+    series_results = data.get("series", [])
+    narrator_results = data.get("narrators", [])
 
-    if not book_results:
+    has_results = book_results or author_results or series_results or narrator_results
+
+    if not has_results:
         console.print("[yellow]Keine Ergebnisse gefunden.[/yellow]")
         return
 
-    table = Table(title=f"Suchergebnisse fuer '{query}' ({len(book_results)})")
-    table.add_column("ID", style="dim", no_wrap=True)
-    table.add_column("Titel", style="bold")
-    table.add_column("Autor")
-    table.add_column("Dauer", justify="right")
+    if book_results:
+        table = Table(title=f"Buecher ({len(book_results)})")
+        table.add_column("ID", style="dim", no_wrap=True)
+        table.add_column("Titel", style="bold")
+        table.add_column("Autor")
+        table.add_column("Dauer", justify="right")
 
-    for result in book_results:
-        lib_item = result.get("libraryItem", {})
-        item = LibraryItem.from_api(lib_item)
-        table.add_row(
-            item.id,
-            item.title,
-            item.author or "-",
-            _format_duration(item.duration),
-        )
+        for result in book_results:
+            lib_item = result.get("libraryItem", {})
+            item = LibraryItem.from_api(lib_item)
+            table.add_row(
+                item.id,
+                item.title,
+                item.author or "-",
+                _format_duration(item.duration),
+            )
+        console.print(table)
 
-    console.print(table)
+    if author_results:
+        table = Table(title=f"Autoren ({len(author_results)})")
+        table.add_column("Name", style="bold")
+        table.add_column("Buecher", justify="right")
+        for author in author_results:
+            table.add_row(
+                author.get("name", "-"),
+                str(author.get("numBooks", 0)),
+            )
+        console.print(table)
+
+    if series_results:
+        table = Table(title=f"Serien ({len(series_results)})")
+        table.add_column("Name", style="bold")
+        table.add_column("Buecher", justify="right")
+        for series in series_results:
+            s = series.get("series", {})
+            table.add_row(
+                s.get("name", "-"),
+                str(len(series.get("books", []))),
+            )
+        console.print(table)
+
+    if narrator_results:
+        table = Table(title=f"Sprecher ({len(narrator_results)})")
+        table.add_column("Name", style="bold")
+        for narrator in narrator_results:
+            table.add_row(narrator.get("name", "-"))
+        console.print(table)

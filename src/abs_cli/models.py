@@ -59,6 +59,8 @@ class LibraryItem:
     duration: float = 0.0
     asin: str | None = None
     is_missing: bool = False
+    progress: float = 0.0
+    is_finished: bool = False
 
     @classmethod
     def from_api(cls, data: dict[str, Any]) -> LibraryItem:
@@ -72,6 +74,7 @@ class LibraryItem:
         """
         media = data.get("media", {})
         metadata = media.get("metadata", {})
+        progress_data = data.get("mediaProgress") or {}
         return cls(
             id=data["id"],
             title=metadata.get("title", "Unbekannt"),
@@ -80,6 +83,8 @@ class LibraryItem:
             duration=media.get("duration") or 0.0,
             asin=metadata.get("asin"),
             is_missing=data.get("isMissing", False),
+            progress=progress_data.get("progress", 0.0) if progress_data else 0.0,
+            is_finished=progress_data.get("isFinished", False) if progress_data else False,
         )
 
 
