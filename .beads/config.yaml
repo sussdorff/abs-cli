@@ -21,6 +21,7 @@
 
 # Disable auto-import from JSONL when it's newer than database
 # no-auto-import: false
+no-auto-import: true
 
 # Enable JSON output by default
 # json: false
@@ -65,3 +66,11 @@
 # - linear.api-key
 # - github.org
 # - github.repo
+
+dolt.shared-server: false
+
+import.auto: false
+
+export.auto: false
+
+export.git-add: false
