@@ -14,7 +14,7 @@ import pytest
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 PREFLIGHT = REPO_ROOT / "scripts" / "dev" / "preflight.sh"
-CHECKER_REL = Path(".agents/standards/toolchains/scripts/check_toolchain_versions.py")
+CHECKER_REL = Path("scripts/dev/check_toolchain_versions.py")
 
 STUB_CHECKER = """\
 import os
@@ -32,7 +32,7 @@ def repo(tmp_path: Path) -> Path:
     (root / "scripts" / "dev").mkdir(parents=True)
     shutil.copy2(PREFLIGHT, root / "scripts" / "dev" / "preflight.sh")
     checker = root / CHECKER_REL
-    checker.parent.mkdir(parents=True)
+    checker.parent.mkdir(parents=True, exist_ok=True)
     checker.write_text(STUB_CHECKER)
     (root / "sub" / "dir").mkdir(parents=True)
     subprocess.run(["git", "init", "-q", str(root)], check=True)
